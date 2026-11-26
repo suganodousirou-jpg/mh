@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>3Dミニモンハン - 村＆狩猟フィールド</title>
+  <link rel="stylesheet" href="https://pyscript.net/releases/2024.11.1/core.css">
+  <script type="module" src="https://pyscript.net/releases/2024.11.1/core.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <style>
+    * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #111;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+      color: #fff;
+      touch-action: none;
+    }
+    #game-canvas { display: block; width: 100vw; height: 100vh; }
+
+    /* 上部HUD */
+    #hud {
+      position: fixed; top: 10px; left: 10px; right: 10px;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      pointer-events: none; z-index: 10; gap: 8px;
+    }
+    .panel {
+      background: rgba(20, 24, 32, 0.82);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 10px; padding: 8px 12px; font-size: 13px;
+      line-height: 1.5; backdrop-filter: blur(4px);
+    }
+    #msg {
+      position: fixed; top: 82px; left: 50%; transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.72); padding: 6px 14px; border-radius: 20px;
+      font-size: 13px; color: #ffd166; white-space: nowrap; z-index: 10;
+      pointer-events: none;
+    }
+
+    /* 操作パッド */
+    #pad-area {
+      position: fixed; bottom: 20px; left: 20px; width: 130px; height: 130px;
+      background: rgba(255,255,255,0.12); border: 2px solid rgba(255,255,255,0.25);
+      border-radius: 50%; z-index: 20;
+    }
+    #pad-stick {
+      position: absolute; top: 40px; left: 40px; width: 50px; height: 50px;
+      background: rgba(255,255,255,0.55); border-radius: 50%;
+    }
+
+    /* 右下アクションボタン */
+    #action-area {
+      position: fixed; bottom: 20px; right: 20px;
+      display: flex; flex-direction: column; gap: 10px; align-items: flex-end; z-index: 20;
+    }
+    .row-btns { display: flex; gap: 10px; }
+    button {
+      border: none; border-radius: 12px; font-weight: bold; color: #fff;
+      padding: 12px 16px; font-size: 14px; box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+    }
+    button:active { transform: scale(0.95); }
+    #btn-atk { background: #e05a47; padding: 16px 22px; font-size: 16px; }
+    #btn-dodge { background: #2e8b57; }
+    #btn-interact { background: #3a86ff; }
+    #btn-weapon { background: #6c757d; font-size: 12px; padding: 8px 12px; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div class="panel">
+      <div id="area-label">📍 拠点：カムラの小村</div>
+      <div id="hunter-stat">🛡️ HP: 100/100 | ⚔️ 大剣</div>
+    </div>
+    <div class="panel" style="pointer-events: auto; text-align: right;">
+      <div id="target-stat">ターゲット：なし（村で安全）</div>
+      <button id="btn-weapon" style="margin-top:4px;">🔄 武器変更</button>
+    </div>
+  </div>
+
+  <div id="msg">左下のスティックで移動！村の受付(青い柱)や門から出発</div>
+
+  <div id="pad-area"><div id="pad-stick"></div></div>
+
+  <div id="action-area">
+    <div class="row-btns">
+      <button id="btn-interact">⛺ 村/出発</button>
+      <button id="btn-dodge">🌀 回避</button>
+    </div>
+    <button id="btn-atk">⚔️ 攻撃</button>
+  </div>
+
+  <script type="py">
+    import math
+    import random
+    from js import THREE, window, document, requestAnimationFrame
+    from pyodide.ffi import create_proxy
+
+    WEAPONS = [
+        {"name": "大剣", "dmg": (45, 65), "range": 3.6, "cd": 28, "color": 0xcccccc},
+        {"name": "太刀", "dmg": (28, 42), "range": 3.4, "cd": 16, "color": 0x72efdd},
+        {"name": "双剣", "dmg": (16, 24), "range": 2.4, "cd": 8,  "color": 0xffbe0b},
+        {"name": "ハンマー", "dmg": (42, 58), "range": 3.0, "cd": 24, "color": 0xf77f00},
+    ]
+
+    MONSTER_TYPES = [
+        {"name": "ドスジャグラス（小型竜）", "hp": 180, "speed": 0.055, "scale": 1.0, "color": 0xe9c46a, "dmg": 12},
+        {"name": "リオレウス（火竜）",     "hp": 320, "speed": 0.048, "scale": 1.5, "color": 0xd62828, "dmg": 22},
+        {"name": "ジンオウガ（雷狼竜）",   "hp": 380, "speed": 0.065, "scale": 1.4, "color": 0x00b4d8, "dmg": 25},
+        {"name": "ティガレックス（轟竜）", "hp": 420, "speed": 0.070, "scale": 1.6, "color": 0xf4a261, "dmg": 28},
+    ]
+
+    scene = THREE.Scene.new()
+    scene.background = THREE.Color.new(0x87ceeb)
+    scene.fog = THREE.Fog.new(0x87ceeb, 25, 85)
+
+    camera = THREE.PerspectiveCamera.new(60, window.innerWidth / window.innerHeight, 0.1, 150)
+    renderer = THREE.WebGLRenderer.new({"antialias": True})
+    renderer.setSize(window.innerWidth, window.innerHeight)
+    renderer.domElement.id = "game-canvas"
+    document.body.appendChild(renderer.domElement)
+
+    def on_resize(event):
+        w = max(1, window.innerWidth)
+        h = max(1, window.innerHeight)
+        camera.aspect = w / h
+        camera.updateProjectionMatrix()
+        renderer.setSize(w, h)
+
+    window.addEventListener("resize", create_proxy(on_resize))
+
+    amb = THREE.AmbientLight.new(0xffffff, 0.65)
+    scene.add(amb)
+    dir_light = THREE.DirectionalLight.new(0xffffff, 0.85)
+    dir_light.position.set(15, 30, 20)
+    scene.add(dir_light)
+
+    village_ground = THREE.Mesh.new(
+        THREE.PlaneGeometry.new(50, 35),
+        THREE.MeshLambertMaterial.new({"color": 0xc2b280})
+    )
+    village_ground.rotation.x = -math.pi / 2
+    village_ground.position.set(0, 0, 17.5)
+    scene.add(village_ground)
+
+    field_ground = THREE.Mesh.new(
+        THREE.PlaneGeometry.new(80, 80),
+        THREE.MeshLambertMaterial.new({"color": 0x386641})
+    )
+    field_ground.rotation.x = -math.pi / 2
+    field_ground.position.set(0, 0, -40)
+    scene.add(field_ground)
+
+    def add_box(x, y, z, w, h, d, color):
+        m = THREE.Mesh.new(THREE.BoxGeometry.new(w, h, d), THREE.MeshLambertMaterial.new({"color": color}))
+        m.position.set(x, y, z)
+        scene.add(m)
+        return m
+
+    add_box(-8, 1.5, 14, 4, 3, 4, 0x8d5524)
+    add_box(-8, 3.5, 14, 4.6, 1.2, 4.6, 0x5c3317)
+    add_box(8, 1.5, 16, 4.5, 3, 4, 0x9c6644)
+    add_box(8, 3.5, 16, 5.2, 1.2, 4.6, 0x3d405b)
+
+    # 村の門（左右の柱に当たり判定を持たせる）
+    gate_pillars = [(-4.0, 0.5, 1.2), (4.0, 0.5, 1.2)]
+    add_box(-4, 2.5, 0.5, 1.2, 5, 1.2, 0x6f1d1b)
+    add_box(4, 2.5, 0.5, 1.2, 5, 1.2, 0x6f1d1b)
+    add_box(0, 4.8, 0.5, 9.5, 1.0, 1.4, 0x6f1d1b)
+
+    add_box(0, 1.5, 8, 1.4, 3.0, 1.4, 0x3a86ff)
+
+    for tx, tz in [(-18, -15), (20, -22), (-25, -45), (22, -55), (-10, -62), (12, -35)]:
+        add_box(tx, 1.5, tz, 1.0, 3.0, 1.0, 0x582f0e)
+        add_box(tx, 4.0, tz, 3.5, 3.0, 3.5, 0x2d6a4f)
+
+    hunter_group = THREE.Group.new()
+    body_mesh = THREE.Mesh.new(
+        THREE.CylinderGeometry.new(0.45, 0.5, 1.4, 12),
+        THREE.MeshLambertMaterial.new({"color": 0x1d3557})
+    )
+    body_mesh.position.y = 0.7
+    head_mesh = THREE.Mesh.new(
+        THREE.SphereGeometry.new(0.38, 12, 12),
+        THREE.MeshLambertMaterial.new({"color": 0xf1faee})
+    )
+    head_mesh.position.y = 1.65
+
+    weapon_mesh = THREE.Mesh.new(
+        THREE.BoxGeometry.new(0.18, 1.8, 0.35),
+        THREE.MeshLambertMaterial.new({"color": WEAPONS[0]["color"]})
+    )
+    weapon_mesh.position.set(0.65, 1.1, 0.3)
+    weapon_mesh.rotation.x = 0.4
+
+    hunter_group.add(body_mesh)
+    hunter_group.add(head_mesh)
+    hunter_group.add(weapon_mesh)
+    scene.add(hunter_group)
+
+    state = {
+        "hx": 0.0, "hz": 14.0, "rot": math.pi,
+        "hhp": 100, "weapon_idx": 0,
+        "atk_cd": 0, "atk_anim": 0, "invincible": 0,
+        "joy_x": 0.0, "joy_y": 0.0,
+        "monsters": [],
+        "hunted_count": 0
+    }
+
+    def show_msg(text):
+        document.getElementById("msg").textContent = text
+
+    def resolve_gate_collision(x, z, radius=0.65):
+        for gx, gz, gw in gate_pillars:
+            half_w = gw * 0.5 + radius
+            half_d = 0.6 + radius
+            dx = x - gx
+            dz = z - gz
+            if abs(dx) < half_w and abs(dz) < half_d:
+                if (half_w - abs(dx)) < (half_d - abs(dz)):
+                    x = gx + (half_w if dx >= 0 else -half_w)
+                else:
+                    z = gz + (half_d if dz >= 0 else -half_d)
+        return x, z
+
+    def spawn_monsters():
+        for m in state["monsters"]:
+            scene.remove(m["mesh"])
+        state["monsters"].clear()
+
+        positions = [(-12, -18), (14, -24), (-15, -48), (15, -52), (0, -36)]
+        for i, (mx, mz) in enumerate(positions):
+            spec = MONSTER_TYPES[i % len(MONSTER_TYPES)]
+            g = THREE.Group.new()
+            s = spec["scale"]
+            torso = THREE.Mesh.new(
+                THREE.BoxGeometry.new(1.6 * s, 1.3 * s, 2.6 * s),
+                THREE.MeshLambertMaterial.new({"color": spec["color"]})
+            )
+            torso.position.y = 0.9 * s
+            mhead = THREE.Mesh.new(
+                THREE.BoxGeometry.new(1.0 * s, 0.9 * s, 1.1 * s),
+                THREE.MeshLambertMaterial.new({"color": spec["color"]})
+            )
+            mhead.position.set(0, 1.3 * s, 1.6 * s)
+            g.add(torso)
+            g.add(mhead)
+            g.position.set(mx, 0, mz)
+            scene.add(g)
+
+            state["monsters"].append({
+                "mesh": g, "spec": spec,
+                "x": float(mx), "z": float(mz),
+                "hp": spec["hp"], "max_hp": spec["hp"],
+                "ai_tick": random.randint(0, 60)
+            })
+
+    def update_weapon_visual():
+        w = WEAPONS[state["weapon_idx"]]
+        weapon_mesh.material.color.setHex(w["color"])
+        if w["name"] == "大剣":
+            weapon_mesh.scale.set(1.3, 1.25, 1.4)
+        elif w["name"] == "太刀":
+            weapon_mesh.scale.set(0.7, 1.35, 0.9)
+        elif w["name"] == "双剣":
+            weapon_mesh.scale.set(0.8, 0.75, 0.8)
+        else:
+            weapon_mesh.scale.set(1.8, 0.95, 1.8)
+
+    def switch_weapon(event=None):
+        state["weapon_idx"] = (state["weapon_idx"] + 1) % len(WEAPONS)
+        update_weapon_visual()
+        w = WEAPONS[state["weapon_idx"]]
+        show_msg(f"⚔️ 武器を「{w['name']}」に持ち替えた！")
+
+    def interact_village(event=None):
+        if state["hz"] > 0:
+            state["hhp"] = 100
+            if len(state["monsters"]) == 0:
+                spawn_monsters()
+            state["hx"], state["hz"] = 0.0, -6.0
+            state["rot"] = math.pi
+            show_msg("🌲 狩猟フィールドへ出発！モンスターを討伐しよう！")
+        else:
+            state["hx"], state["hz"] = 0.0, 12.0
+            state["hhp"] = 100
+            show_msg("⛺ 村に帰還し、体力と装備を整えた！（HP全快）")
+
+    def do_attack(event=None):
+        if state["atk_cd"] > 0:
+            return
+        w = WEAPONS[state["weapon_idx"]]
+        state["atk_cd"] = w["cd"]
+        state["atk_anim"] = 10
+        hit_any = False
+
+        for m in list(state["monsters"]):
+            dx = m["x"] - state["hx"]
+            dz = m["z"] - state["hz"]
+            dist = math.hypot(dx, dz)
+            if dist <= w["range"] + m["spec"]["scale"] * 0.8:
+                dmg = random.randint(w["dmg"][0], w["dmg"][1])
+                m["hp"] -= dmg
+                hit_any = True
+                if m["hp"] <= 0:
+                    scene.remove(m["mesh"])
+                    state["monsters"].remove(m)
+                    state["hunted_count"] += 1
+                    show_msg(f"🎉 {m['spec']['name']} を討伐！（累計 {state['hunted_count']} 頭）")
+                else:
+                    show_msg(f"⚔️ {w['name']}ヒット！{m['spec']['name']}に {dmg} ダメージ（残HP:{m['hp']}）")
+                break
+
+        if not hit_any and state["hz"] <= 0:
+            show_msg(f"⚔️ {w['name']}を振った！（空振り）")
+
+    def do_dodge(event=None):
+        if state["invincible"] > 0:
+            return
+        step = 2.6
+        nx = max(-35.0, min(35.0, state["hx"] + math.sin(state["rot"]) * step))
+        nz = max(-75.0, min(30.0, state["hz"] + math.cos(state["rot"]) * step))
+        state["hx"], state["hz"] = resolve_gate_collision(nx, nz)
+        state["invincible"] = 22
+        show_msg("🌀 回避ステップ！")
+
+    pad = document.getElementById("pad-area")
+    stick = document.getElementById("pad-stick")
+    dragging = {"active": False}
+
+    def update_stick(client_x, client_y):
+        rect = pad.getBoundingClientRect()
+        cx = rect.left + rect.width / 2
+        cy = rect.top + rect.height / 2
+        dx = client_x - cx
+        dy = client_y - cy
+        max_r = 40.0
+        dist = math.hypot(dx, dy)
+        if dist > max_r:
+            dx = dx / dist * max_r
+            dy = dy / dist * max_r
+        stick.style.left = f"{40 + dx}px"
+        stick.style.top = f"{40 + dy}px"
+        state["joy_x"] = dx / max_r
+        state["joy_y"] = dy / max_r
+
+    def reset_stick():
+        dragging["active"] = False
+        stick.style.left = "40px"
+        stick.style.top = "40px"
+        state["joy_x"] = 0.0
+        state["joy_y"] = 0.0
+
+    def on_touch_start(e):
+        if e.touches.length > 0:
+            dragging["active"] = True
+            t = e.touches.item(0)
+            update_stick(t.clientX, t.clientY)
+
+    def on_touch_move(e):
+        if not dragging["active"] or e.touches.length == 0:
+            return
+        t = e.touches.item(0)
+        update_stick(t.clientX, t.clientY)
+
+    def on_touch_end(e):
+        if e.touches.length == 0:
+            reset_stick()
+        else:
+            t = e.touches.item(0)
+            update_stick(t.clientX, t.clientY)
+
+    pad.addEventListener("touchstart", create_proxy(on_touch_start))
+    pad.addEventListener("touchmove", create_proxy(on_touch_move))
+    pad.addEventListener("touchend", create_proxy(on_touch_end))
+    pad.addEventListener("touchcancel", create_proxy(reset_stick))
+
+    document.getElementById("btn-atk").addEventListener("click", create_proxy(do_attack))
+    document.getElementById("btn-dodge").addEventListener("click", create_proxy(do_dodge))
+    document.getElementById("btn-interact").addEventListener("click", create_proxy(interact_village))
+    document.getElementById("btn-weapon").addEventListener("click", create_proxy(switch_weapon))
+
+    def animate(timestamp):
+        if state["atk_cd"] > 0:
+            state["atk_cd"] -= 1
+        if state["invincible"] > 0:
+            state["invincible"] -= 1
+
+        if state["atk_anim"] > 0:
+            state["atk_anim"] -= 1
+            weapon_mesh.rotation.x = 0.4 + math.sin((10 - state["atk_anim"]) * 0.3) * 1.6
+        else:
+            weapon_mesh.rotation.x = 0.4
+
+        jx, jy = state["joy_x"], state["joy_y"]
+        if math.hypot(jx, jy) > 0.12:
+            speed = 0.16
+            nx = state["hx"] + jx * speed
+            nz = state["hz"] + jy * speed
+            nx = max(-35.0, min(35.0, nx))
+            nz = max(-75.0, min(30.0, nz))
+            state["hx"], state["hz"] = resolve_gate_collision(nx, nz)
+            state["rot"] = math.atan2(jx, jy)
+
+        hunter_group.position.set(state["hx"], 0, state["hz"])
+        hunter_group.rotation.y = state["rot"]
+
+        in_village = state["hz"] > 0
+        if in_village and state["hhp"] < 100:
+            state["hhp"] = min(100, state["hhp"] + 1)
+
+        nearest = None
+        nearest_dist = 999.0
+
+        for m in state["monsters"]:
+            dx = state["hx"] - m["x"]
+            dz = state["hz"] - m["z"]
+            dist = max(0.1, math.hypot(dx, dz))
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = m
+
+            if not in_village and dist < 24.0:
+                m["mesh"].rotation.y = math.atan2(dx, dz)
+                if dist > 2.2 * m["spec"]["scale"]:
+                    nm_x = m["x"] + (dx / dist) * m["spec"]["speed"]
+                    nm_z = m["z"] + (dz / dist) * m["spec"]["speed"]
+                    # モンスターは村エリア（z > -1.5）へ侵入しないように制限
+                    nm_z = min(-1.5, nm_z)
+                    m["x"], m["z"] = nm_x, nm_z
+                    m["mesh"].position.set(m["x"], 0, m["z"])
+                else:
+                    m["ai_tick"] += 1
+                    if m["ai_tick"] % 55 == 0 and state["invincible"] == 0:
+                        dmg = m["spec"]["dmg"]
+                        state["hhp"] = max(0, state["hhp"] - dmg)
+                        state["invincible"] = 30
+                        show_msg(f"💥 {m['spec']['name']}の攻撃！-{dmg} ダメージ！")
+
+        if state["hhp"] <= 0:
+            state["hx"], state["hz"] = 0.0, 14.0
+            state["hhp"] = 100
+            show_msg("🐱 アイルーに村まで運ばれた…体力を回復して再挑戦！")
+
+        camera.position.set(state["hx"], 7.5, state["hz"] + 10.5)
+        camera.lookAt(state["hx"], 1.2, state["hz"] - 2.0)
+
+        w = WEAPONS[state["weapon_idx"]]
+        document.getElementById("area-label").textContent = "📍 拠点：カムラの小村（安全地帯）" if in_village else f"🌲 狩猟フィールド（討伐数: {state['hunted_count']}）"
+        document.getElementById("hunter-stat").textContent = f"🛡️ HP: {state['hhp']}/100 | ⚔️ {w['name']}"
+        if nearest and not in_village:
+            document.getElementById("target-stat").textContent = f"🐉 {nearest['spec']['name']} HP:{nearest['hp']}/{nearest['max_hp']}"
+        else:
+            document.getElementById("target-stat").textContent = f"残モンスター: {len(state['monsters'])} 頭"
+
+        renderer.render(scene, camera)
+        requestAnimationFrame(create_proxy(animate))
+
+    spawn_monsters()
+    update_weapon_visual()
+    requestAnimationFrame(create_proxy(animate))
+  </script>
+</body>
+</html>
